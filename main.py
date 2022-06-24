@@ -6,6 +6,7 @@ import os
 import d4rl
 
 import utils
+import get_dataset
 from algos import DWBC
 
 
@@ -37,8 +38,9 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
     # Experiment
-    parser.add_argument("--policy", default="DWBC")  # Policy name
-    parser.add_argument("--env", default="hopper-medium-v0")  # OpenAI gym environment name
+    parser.add_argument("--algorithm", default="DWBC")  # Policy name
+    parser.add_argument('--env', default="hopper-expert-v2")  # environment name
+    parser.add_argument("--split_x", default=3, type=int)  # percentile X used to select the dataset
     parser.add_argument("--seed", default=0, type=int)  # Sets Gym, PyTorch and Numpy seeds
     parser.add_argument("--eval_freq", default=5e3, type=int)  # How often (time steps) we evaluate
     parser.add_argument("--max_timesteps", default=1e6, type=int)  # Max time steps to run environment
@@ -46,17 +48,14 @@ if __name__ == "__main__":
     parser.add_argument("--load_model", default="")  # Model load file name, "" doesn't load, "default" uses file_name
     # DWBC
     parser.add_argument("--batch_size", default=256, type=int)  # Batch size for both actor and critic
-    parser.add_argument("--discount", default=0.99)  # Discount factor
-    parser.add_argument("--tau", default=0.005)  # Target network update rate
-    parser.add_argument("--policy_noise", default=0.2)  # Noise added to target policy during critic update
-    parser.add_argument("--noise_clip", default=0.5)  # Range to clip target policy noise
-    parser.add_argument("--alpha", default=2.5)
+    parser.add_argument("--alpha", default=10)
+    parser.add_argument("--eta", default=0.5)
     parser.add_argument("--normalize", default=True)
     args = parser.parse_args()
 
-    file_name = f"{args.policy}_{args.env}_{args.seed}"
+    file_name = f"{args.algorithm}_{args.env}_{args.split_x}_{args.seed}"
     print("---------------------------------------")
-    print(f"Policy: {args.policy}, Env: {args.env}, Seed: {args.seed}")
+    print(f"Algorithm: {args.algorithm}, env: {args.env}, X: {args.split_x}, Seed: {args.seed}")
     print("---------------------------------------")
 
     if not os.path.exists("./results"):
@@ -65,29 +64,29 @@ if __name__ == "__main__":
     if args.save_model and not os.path.exists("./models"):
         os.makedirs("./models")
 
-    env = gym.make(args.env)
+    env_e = gym.make(args.env)
+    env_id = args.env.split('-')[0]
+    env_o = gym.make(f'{env_id}-random-v2')
 
     # Set seeds
-    env.seed(args.seed)
-    env.action_space.seed(args.seed)
+    env_e.seed(args.seed)
+    env_e.action_space.seed(args.seed)
+    env_o.seed(args.seed)
+    env_o.action_space.seed(args.seed)
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
 
-    state_dim = env.observation_space.shape[0]
-    action_dim = env.action_space.shape[0]
-    max_action = float(env.action_space.high[0])
+    state_dim = env_e.observation_space.shape[0]
+    action_dim = env_e.action_space.shape[0]
+    max_action = float(env_e.action_space.high[0])
 
     kwargs = {
         "state_dim": state_dim,
         "action_dim": action_dim,
         "max_action": max_action,
-        "discount": args.discount,
-        "tau": args.tau,
         # DWBC
-        "policy_noise": args.policy_noise * max_action,
-        "noise_clip": args.noise_clip * max_action,
-        "policy_freq": args.policy_freq,
-        "alpha": args.alpha
+        "alpha": args.alpha,
+        "eta": args.eta,
     }
 
     # Initialize policy
@@ -97,19 +96,42 @@ if __name__ == "__main__":
         policy_file = file_name if args.load_model == "default" else args.load_model
         policy.load(f"./models/{policy_file}")
 
-    replay_buffer = utils.ReplayBuffer(state_dim, action_dim)
-    replay_buffer.convert_D4RL(d4rl.qlearning_dataset(env))
+    # Load dataset
+    if "replay" in args.env:  # setting 1
+        dataset_e_raw = env_e.get_dataset()
+        dataset_e, dataset_o = get_dataset.dataset_setting1(dataset_e_raw, args.split_x)
+
+    else:  # setting 2
+        dataset_e_raw = env_e.get_dataset()
+        dataset_o_raw = env_o.get_dataset()
+        dataset_e, dataset_o = get_dataset.dataset_setting2(dataset_e_raw, dataset_o_raw, args.split_x)
+
+    states_e = dataset_e['observations']
+    states_o = dataset_o['observations']
+    states_b = np.concatenate([states_e, states_o]).astype(np.float32)
+
+    print('# {} of expert demonstraions'.format(states_e.shape[0]))
+    print('# {} of imperfect demonstraions'.format(states_o.shape[0]))
+
+    replay_buffer_e = utils.ReplayBuffer(state_dim, action_dim)
+    replay_buffer_o = utils.ReplayBuffer(state_dim, action_dim)
+    replay_buffer_e.convert_D4RL(dataset_e)
+    replay_buffer_o.convert_D4RL(dataset_o)
+
     if args.normalize:
-        mean, std = replay_buffer.normalize_states()
+        shift = np.mean(states_b, 0)
+        scale = np.std(states_b, 0) + 1e-3
     else:
-        mean, std = 0, 1
+        shift, scale = 0, 1
+    replay_buffer_e.normalize_states(mean=shift, std=scale)
+    replay_buffer_o.normalize_states(mean=shift, std=scale)
 
     evaluations = []
     for t in range(int(args.max_timesteps)):
-        policy.train(replay_buffer, args.batch_size)
+        policy.train(replay_buffer_e, replay_buffer_o, args.batch_size)
         # Evaluate episode
         if (t + 1) % args.eval_freq == 0:
             print(f"Time steps: {t + 1}")
-            evaluations.append(eval_policy(policy, args.env, args.seed, mean, std))
+            evaluations.append(eval_policy(policy, args.env, args.seed, shift, scale))
             np.save(f"./results/{file_name}", evaluations)
             if args.save_model: policy.save(f"./models/{file_name}")

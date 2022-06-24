@@ -1,61 +1,99 @@
 import copy
+import math
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.distributions import Normal
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+MEAN_MIN = -9.0
+MEAN_MAX = 9.0
+LOG_STD_MIN = -5
+LOG_STD_MAX = 10
+EPS = 1e-7
 
 
 class Actor(nn.Module):
     def __init__(self, state_dim, action_dim, max_action):
         super(Actor, self).__init__()
 
-        self.l1 = nn.Linear(state_dim, 256)
-        self.l2 = nn.Linear(256, 256)
-        self.l3 = nn.Linear(256, action_dim)
+        self.fc1 = nn.Linear(state_dim, 256)
+        self.fc2 = nn.Linear(256, 256)
+        self.mu_head = nn.Linear(256, action_dim)
+        self.sigma_head = nn.Linear(256, action_dim)
+
+        torch.nn.init.orthogonal_(self.fc1.weight.data, gain=math.sqrt(2.0))
+        torch.nn.init.orthogonal_(self.fc2.weight.data, gain=math.sqrt(2.0))
+        torch.nn.init.orthogonal_(self.mu_head.weight.data, gain=math.sqrt(2.0))
+        torch.nn.init.orthogonal_(self.sigma_head.weight.data, gain=math.sqrt(2.0))
 
         self.max_action = max_action
 
     def forward(self, state):
-        a = F.relu(self.l1(state))
-        a = F.relu(self.l2(a))
-        return self.max_action * torch.tanh(self.l3(a))
+        a = F.relu(self.fc1(state))
+        a = F.relu(self.fc2(a))
+        mu = self.mu_head(a)
+        mu = torch.clip(mu, MEAN_MIN, MEAN_MAX)
+        log_sigma = self.sigma_head(a)
+        log_sigma = torch.clip(log_sigma, LOG_STD_MIN, LOG_STD_MAX)
+        sigma = torch.exp(log_sigma)
+
+        a_distribution = Normal(mu, sigma)
+        action = a_distribution.rsample()
+
+        logp_pi = a_distribution.log_prob(action).sum(axis=-1)
+        logp_pi -= (2 * (np.log(2) - action - F.softplus(-2 * action))).sum(axis=1)
+        logp_pi = torch.unsqueeze(logp_pi, dim=1)
+
+        action = self.max_action * torch.tanh(action)
+        mu = torch.tanh(mu) * self.max_action
+        return action, logp_pi, mu
+
+    def get_log_density(self, state, action):
+        a = F.relu(self.fc1(state))
+        a = F.relu(self.fc2(a))
+        mu = self.mu_head(a)
+        mu = torch.clip(mu, MEAN_MIN, MEAN_MAX)
+        log_sigma = self.sigma_head(a)
+        log_sigma = torch.clip(log_sigma, LOG_STD_MIN, LOG_STD_MAX)
+        sigma = torch.exp(log_sigma)
+        a_distribution = Normal(mu, sigma)
+
+        action_clip = torch.clip(action, -1. + EPS, 1. - EPS)
+        raw_action = torch.atanh(action_clip)
+
+        # logp_action = a_distribution.log_prob(raw_action).sum(axis=-1)
+        # logp_action -= (2 * (np.log(2) - raw_action - F.softplus(-2 * raw_action))).sum(axis=1)
+        # logp_action = torch.unsqueeze(logp_action, dim=1)
+        logp_action = a_distribution.log_prob(raw_action)
+        logp_action -= (2 * (np.log(2) - raw_action - F.softplus(-2 * raw_action)))
+        return logp_action
 
 
-class Critic(nn.Module):
+class Discriminator(nn.Module):
     def __init__(self, state_dim, action_dim):
-        super(Critic, self).__init__()
+        super(Discriminator, self).__init__()
 
-        # Q1 architecture
-        self.l1 = nn.Linear(state_dim + action_dim, 256)
-        self.l2 = nn.Linear(256, 256)
-        self.l3 = nn.Linear(256, 1)
+        self.fc1_1 = nn.Linear(state_dim + action_dim, 128)
+        self.fc1_2 = nn.Linear(action_dim, 128)
+        self.fc2 = nn.Linear(256, 256)
+        self.fc3 = nn.Linear(256, 1)
 
-        # Q2 architecture
-        self.l4 = nn.Linear(state_dim + action_dim, 256)
-        self.l5 = nn.Linear(256, 256)
-        self.l6 = nn.Linear(256, 1)
+        torch.nn.init.orthogonal_(self.fc1_1.weight.data, gain=math.sqrt(2.0))
+        torch.nn.init.orthogonal_(self.fc1_2.weight.data, gain=math.sqrt(2.0))
+        torch.nn.init.orthogonal_(self.fc2.weight.data, gain=math.sqrt(2.0))
+        torch.nn.init.orthogonal_(self.fc3.weight.data, gain=math.sqrt(2.0))
 
-    def forward(self, state, action):
+    def forward(self, state, action, log_pi):
         sa = torch.cat([state, action], 1)
-
-        q1 = F.relu(self.l1(sa))
-        q1 = F.relu(self.l2(q1))
-        q1 = self.l3(q1)
-
-        q2 = F.relu(self.l4(sa))
-        q2 = F.relu(self.l5(q2))
-        q2 = self.l6(q2)
-        return q1, q2
-
-    def Q1(self, state, action):
-        sa = torch.cat([state, action], 1)
-
-        q1 = F.relu(self.l1(sa))
-        q1 = F.relu(self.l2(q1))
-        q1 = self.l3(q1)
-        return q1
+        d1 = F.relu(self.fc1_1(sa))
+        d2 = F.relu(self.fc1_2(log_pi))
+        d = torch.cat([d1, d2], 1)
+        d = self.fc2(d)
+        d = self.fc3(d)
+        return d
 
 
 class DWBC(object):
@@ -64,102 +102,72 @@ class DWBC(object):
             state_dim,
             action_dim,
             max_action,
-            discount=0.99,
-            tau=0.005,
-            policy_noise=0.2,
-            noise_clip=0.5,
-            policy_freq=2,
             alpha=2.5,
+            eta=0.5,
     ):
 
-        self.actor = Actor(state_dim, action_dim, max_action).to(device)
-        self.actor_target = copy.deepcopy(self.actor)
-        self.actor_optimizer = torch.optim.Adam(self.actor.parameters(), lr=3e-4)
+        self.policy = Actor(state_dim, action_dim, max_action).to(device)
+        self.policy_optimizer = torch.optim.Adam(self.policy.parameters(), lr=3e-4)
 
-        self.critic = Critic(state_dim, action_dim).to(device)
-        self.critic_target = copy.deepcopy(self.critic)
-        self.critic_optimizer = torch.optim.Adam(self.critic.parameters(), lr=3e-4)
+        self.discriminator = Discriminator(state_dim, action_dim).to(device)
+        self.discriminator_optimizer = torch.optim.Adam(self.discriminator.parameters(), lr=3e-4)
 
         self.max_action = max_action
-        self.discount = discount
-        self.tau = tau
-        self.policy_noise = policy_noise
-        self.noise_clip = noise_clip
-        self.policy_freq = policy_freq
         self.alpha = alpha
+        self.eta = eta
 
         self.total_it = 0
 
     def select_action(self, state):
         state = torch.FloatTensor(state.reshape(1, -1)).to(device)
-        return self.actor(state).cpu().data.numpy().flatten()
+        _, _, action = self.policy(state)
+        return action.cpu().data.numpy().flatten()
 
-    def train(self, replay_buffer, batch_size=256):
+    def train(self, replay_buffer_e, replay_buffer_o, batch_size=256):
         self.total_it += 1
 
-        # Sample replay buffer
-        state, action, next_state, reward, not_done = replay_buffer.sample(batch_size)
+        # Sample from D_e and D_o
+        state_e, action_e, _, _, _ = replay_buffer_e.sample(batch_size)
+        state_o, action_o, _, _, _ = replay_buffer_o.sample(batch_size)
+        log_pi_e = self.policy.get_log_density(state_e, action_e)
+        log_pi_o = self.policy.get_log_density(state_o, action_o)
 
-        with torch.no_grad():
-            # Select action according to policy and add clipped noise
-            noise = (
-                    torch.randn_like(action) * self.policy_noise
-            ).clamp(-self.noise_clip, self.noise_clip)
+        # Compute discriminator loss
+        d_e = self.discriminator(state_e, action_e, log_pi_e.detach())
+        d_o = self.discriminator(state_o, action_o, log_pi_o.detach())
 
-            next_action = (
-                    self.actor_target(next_state) + noise
-            ).clamp(-self.max_action, self.max_action)
+        d_loss_e = -torch.log(d_e) + torch.log(1 - d_e)
+        d_loss_o = -torch.log(1 - d_o)
+        d_loss = self.eta * d_loss_e.mean() + d_loss_o.mean()
 
-            # Compute the target Q value
-            target_Q1, target_Q2 = self.critic_target(next_state, next_action)
-            target_Q = torch.min(target_Q1, target_Q2)
-            target_Q = reward + not_done * self.discount * target_Q
+        # Optimize the discriminator
+        self.discriminator_optimizer.zero_grad()
+        d_loss.backward()
+        self.discriminator_optimizer.step()
 
-        # Get current Q estimates
-        current_Q1, current_Q2 = self.critic(state, action)
+        # Compute policy loss
+        d_e_clip = torch.clip(d_e, 0.1, 0.9).detach()
+        d_o_clip = torch.clip(d_o, 0.1, 0.9).detach()
+        bc_loss = -log_pi_e.sum(1)
+        corr_loss_e = -log_pi_e.sum(1) * (self.eta / d_e_clip + self.eta / (1 - d_e_clip))
+        corr_loss_o = -log_pi_o.sum(1) * (1 / (1 - d_o_clip))
+        p_loss = self.alpha * bc_loss.mean() - corr_loss_e.mean() + corr_loss_o.mean()
 
-        # Compute critic loss
-        critic_loss = F.mse_loss(current_Q1, target_Q) + F.mse_loss(current_Q2, target_Q)
-
-        # Optimize the critic
-        self.critic_optimizer.zero_grad()
-        critic_loss.backward()
-        self.critic_optimizer.step()
-
-        # Delayed policy updates
-        if self.total_it % self.policy_freq == 0:
-
-            # Compute actor loss
-            pi = self.actor(state)
-            Q = self.critic.Q1(state, pi)
-            lmbda = self.alpha / Q.abs().mean().detach()
-
-            actor_loss = -lmbda * Q.mean() + F.mse_loss(pi, action)
-
-            # Optimize the actor
-            self.actor_optimizer.zero_grad()
-            actor_loss.backward()
-            self.actor_optimizer.step()
-
-            # Update the frozen target models
-            for param, target_param in zip(self.critic.parameters(), self.critic_target.parameters()):
-                target_param.data.copy_(self.tau * param.data + (1 - self.tau) * target_param.data)
-
-            for param, target_param in zip(self.actor.parameters(), self.actor_target.parameters()):
-                target_param.data.copy_(self.tau * param.data + (1 - self.tau) * target_param.data)
+        # Optimize the policy
+        self.policy_optimizer.zero_grad()
+        p_loss.backward()
+        self.policy_optimizer.step()
 
     def save(self, filename):
-        torch.save(self.critic.state_dict(), filename + "_critic")
-        torch.save(self.critic_optimizer.state_dict(), filename + "_critic_optimizer")
+        torch.save(self.discriminator.state_dict(), filename + "_discriminator")
+        torch.save(self.discriminator_optimizer.state_dict(), filename + "_discriminator_optimizer")
 
-        torch.save(self.actor.state_dict(), filename + "_actor")
-        torch.save(self.actor_optimizer.state_dict(), filename + "_actor_optimizer")
+        torch.save(self.policy.state_dict(), filename + "_policy")
+        torch.save(self.policy_optimizer.state_dict(), filename + "_policy_optimizer")
 
     def load(self, filename):
-        self.critic.load_state_dict(torch.load(filename + "_critic"))
-        self.critic_optimizer.load_state_dict(torch.load(filename + "_critic_optimizer"))
-        self.critic_target = copy.deepcopy(self.critic)
+        self.discriminator.load_state_dict(torch.load(filename + "_discriminator"))
+        self.discriminator_optimizer.load_state_dict(torch.load(filename + "_discriminator_optimizer"))
 
-        self.actor.load_state_dict(torch.load(filename + "_actor"))
-        self.actor_optimizer.load_state_dict(torch.load(filename + "_actor_optimizer"))
-        self.actor_target = copy.deepcopy(self.actor)
+        self.policy.load_state_dict(torch.load(filename + "_policy"))
+        self.policy_optimizer.load_state_dict(torch.load(filename + "_policy_optimizer"))

@@ -45,9 +45,10 @@ class ReplayBuffer(object):
         self.not_done = 1. - dataset['terminals'].reshape(-1, 1)
         self.size = self.state.shape[0]
 
-    def normalize_states(self, eps=1e-3):
-        mean = self.state.mean(0, keepdims=True)
-        std = self.state.std(0, keepdims=True) + eps
+    def normalize_states(self, eps=1e-3, mean=None, std=None):
+        if mean is None and std is None:
+            mean = self.state.mean(0, keepdims=True)
+            std = self.state.std(0, keepdims=True) + eps
         self.state = (self.state - mean) / std
         self.next_state = (self.next_state - mean) / std
         return mean, std
