@@ -65,7 +65,7 @@ def dataset_setting1(dataset, split_x, terminate_on_end=False):
         reward_traj[-1].append(dataset['rewards'][i].astype(np.float32))
         done_traj[-1].append(bool(dataset['terminals'][i]))
 
-        final_timestep = dataset['timeouts'][i]
+        final_timestep = dataset['timeouts'][i] | dataset['terminals'][i]
         if (not terminate_on_end) and final_timestep:
             # Skip this transition and don't apply terminals on the last step of an episode
             return_traj.append(np.sum(reward_traj[-1]))
@@ -122,18 +122,18 @@ def dataset_setting1(dataset, split_x, terminate_on_end=False):
     return dataset_e, dataset_o
 
 
-def dataset_setting2(dataset1, dataset2, split_x, terminate_on_end=False):
+def dataset_setting2(dataset1, dataset2, split_x, exp_num=10):
     """
     Returns D_e and D_o of setting 2 in the paper.
     """
     dataset_o = dataset_T_trajs(dataset2, 1000)
-    dataset_e, dataset_o_extra = dataset_split_expert(dataset1, split_x)
+    dataset_e, dataset_o_extra = dataset_split_expert(dataset1, split_x, exp_num)
     for key in dataset_o.keys():
         dataset_o[key] = np.concatenate([dataset_o[key], dataset_o_extra[key]], 0)
     return dataset_e, dataset_o
 
 
-def dataset_split_expert(dataset, split_x, terminate_on_end=False):
+def dataset_split_expert(dataset, split_x, exp_num, terminate_on_end=False):
     """
     Returns D_e and expert data in D_o of setting 2 in the paper.
     """
@@ -152,7 +152,7 @@ def dataset_split_expert(dataset, split_x, terminate_on_end=False):
         reward_traj[-1].append(dataset['rewards'][i].astype(np.float32))
         done_traj[-1].append(bool(dataset['terminals'][i]))
 
-        final_timestep = dataset['timeouts'][i]
+        final_timestep = dataset['timeouts'][i] | dataset['terminals'][i]
         if (not terminate_on_end) and final_timestep:
             # Skip this transition and don't apply terminals on the last step of an episode
             return_traj.append(np.sum(reward_traj[-1]))
@@ -164,13 +164,12 @@ def dataset_split_expert(dataset, split_x, terminate_on_end=False):
 
     # select 10 trajectories
     inds_all = list(range(len(obs_traj)))
-    succ_num = 10
-    inds_10 = inds_all[:succ_num]
-    inds_e = inds_10[::split_x]
-    inds_e = list(inds_e)
-    inds_10 = list(inds_10)
-    inds_o = set(inds_10) - set(inds_e)
+    inds_succ = inds_all[:exp_num]
+    inds_o = inds_succ[:split_x]
     inds_o = list(inds_o)
+    inds_succ = list(inds_succ)
+    inds_e = set(inds_succ) - set(inds_o)
+    inds_e = list(inds_e)
 
     print('# select {} trajs in expert dataset as D_e'.format(len(inds_e)))
     print('# select {} trajs in expert dataset as expert data in D_o'.format(len(inds_o)))
@@ -228,7 +227,7 @@ def dataset_T_trajs(dataset, T, terminate_on_end=False):
         reward_traj[-1].append(dataset['rewards'][i].astype(np.float32))
         done_traj[-1].append(bool(dataset['terminals'][i]))
 
-        final_timestep = dataset['timeouts'][i]
+        final_timestep = dataset['timeouts'][i] | dataset['terminals'][i]
         if (not terminate_on_end) and final_timestep:
             # Skip this transition and don't apply terminals on the last step of an episode
             return_traj.append(np.sum(reward_traj[-1]))

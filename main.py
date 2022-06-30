@@ -4,10 +4,12 @@ import gym
 import argparse
 import os
 import d4rl
+import wandb
+import time
 
 import utils
 import get_dataset
-from algos import DWBC
+from algos import DWBC, WBC, ORIL
 
 
 # Runs policy for X episodes and returns D4RL score
@@ -29,34 +31,38 @@ def eval_policy(policy, env_name, seed, mean, std, seed_offset=100, eval_episode
     d4rl_score = eval_env.get_normalized_score(avg_reward) * 100
 
     print("---------------------------------------")
-    print(f"Evaluation over {eval_episodes} episodes: {avg_reward:.3f}, D4RL score: {d4rl_score:.3f}")
+    print(f"Env: {env_name}, Evaluation over {eval_episodes} episodes: {avg_reward:.3f}, D4RL score: {d4rl_score:.3f}")
     print("---------------------------------------")
     return d4rl_score
 
 
 if __name__ == "__main__":
-
     parser = argparse.ArgumentParser()
     # Experiment
     parser.add_argument("--algorithm", default="DWBC")  # Policy name
-    parser.add_argument('--env', default="hopper-expert-v2")  # environment name
-    parser.add_argument("--split_x", default=3, type=int)  # percentile X used to select the dataset
+    parser.add_argument('--env', default="ant-medium-replay-v2")  # environment name
+    parser.add_argument("--split_x", default=2, type=int)  # percentile X used to select the dataset
     parser.add_argument("--seed", default=0, type=int)  # Sets Gym, PyTorch and Numpy seeds
     parser.add_argument("--eval_freq", default=5e3, type=int)  # How often (time steps) we evaluate
-    parser.add_argument("--max_timesteps", default=1e6, type=int)  # Max time steps to run environment
+    parser.add_argument("--max_timesteps", default=5e5, type=int)  # Max time steps to run environment
     parser.add_argument("--save_model", action="store_true")  # Save model and optimizer parameters
     parser.add_argument("--load_model", default="")  # Model load file name, "" doesn't load, "default" uses file_name
     # DWBC
     parser.add_argument("--batch_size", default=256, type=int)  # Batch size for both actor and critic
-    parser.add_argument("--alpha", default=10)
-    parser.add_argument("--eta", default=0.5)
-    parser.add_argument("--normalize", default=True)
+    parser.add_argument("--alpha", default=20.0, type=float)
+    parser.add_argument("--pu_learning", default=False, type=bool)
+    parser.add_argument("--eta", default=0.5, type=float)
+    parser.add_argument("--normalize", default=True, type=bool)
     args = parser.parse_args()
 
-    file_name = f"{args.algorithm}_{args.env}_{args.split_x}_{args.seed}"
+    file_name = f"{args.algorithm}_{args.env}_{args.split_x}_{args.seed}_{args.pu_learning}_{args.eta}"
     print("---------------------------------------")
-    print(f"Algorithm: {args.algorithm}, env: {args.env}, X: {args.split_x}, Seed: {args.seed}")
+    print(f"Algorithm: {args.algorithm}, env: {args.env}, X: {args.split_x}, "
+          f"Seed: {args.seed}, PU-learning: {args.pu_learning}, Eta: {args.eta}")
     print("---------------------------------------")
+
+    # wandb
+    # wandb.init(project="OffIL", entity="ryanxhr", name=file_name, config=args)
 
     if not os.path.exists("./results"):
         os.makedirs("./results")
@@ -66,7 +72,12 @@ if __name__ == "__main__":
 
     env_e = gym.make(args.env)
     env_id = args.env.split('-')[0]
-    env_o = gym.make(f'{env_id}-random-v2')
+    if env_id in {'hopper', 'halfcheetah', 'walker2d', 'ant'}:
+        env_o = gym.make(f'{env_id}-random-v2')
+        exp_num = 10
+    else:
+        env_o = gym.make(f'{env_id}-cloned-v1')
+        exp_num = 100
 
     # Set seeds
     env_e.seed(args.seed)
@@ -78,19 +89,12 @@ if __name__ == "__main__":
 
     state_dim = env_e.observation_space.shape[0]
     action_dim = env_e.action_space.shape[0]
-    max_action = float(env_e.action_space.high[0])
-
-    kwargs = {
-        "state_dim": state_dim,
-        "action_dim": action_dim,
-        "max_action": max_action,
-        # DWBC
-        "alpha": args.alpha,
-        "eta": args.eta,
-    }
 
     # Initialize policy
-    policy = DWBC.DWBC(**kwargs)
+    if args.algorithm == 'DWBC':
+        policy = DWBC.DWBC(state_dim, action_dim, args.alpha, args.pu_learning, args.eta)
+    elif args.algorithm == 'WBC':
+        policy = WBC.WBC(state_dim, action_dim, args.alpha)
 
     if args.load_model != "":
         policy_file = file_name if args.load_model == "default" else args.load_model
@@ -99,12 +103,14 @@ if __name__ == "__main__":
     # Load dataset
     if "replay" in args.env:  # setting 1
         dataset_e_raw = env_e.get_dataset()
-        dataset_e, dataset_o = get_dataset.dataset_setting1(dataset_e_raw, args.split_x)
+        split_x = args.split_x
+        dataset_e, dataset_o = get_dataset.dataset_setting1(dataset_e_raw, split_x)
 
-    else:  # setting 2
+    else:  # setting 2 or 3
         dataset_e_raw = env_e.get_dataset()
         dataset_o_raw = env_o.get_dataset()
-        dataset_e, dataset_o = get_dataset.dataset_setting2(dataset_e_raw, dataset_o_raw, args.split_x)
+        split_x = int(exp_num * args.split_x / 100)
+        dataset_e, dataset_o = get_dataset.dataset_setting2(dataset_e_raw, dataset_o_raw, split_x, exp_num)
 
     states_e = dataset_e['observations']
     states_o = dataset_o['observations']

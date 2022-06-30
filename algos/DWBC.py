@@ -5,18 +5,21 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributions import Normal
+from torch.distributions.transformed_distribution import TransformedDistribution
+from torch.distributions.transforms import TanhTransform
+import wandb
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 MEAN_MIN = -9.0
 MEAN_MAX = 9.0
 LOG_STD_MIN = -5
-LOG_STD_MAX = 10
+LOG_STD_MAX = 2
 EPS = 1e-7
 
 
 class Actor(nn.Module):
-    def __init__(self, state_dim, action_dim, max_action):
+    def __init__(self, state_dim, action_dim):
         super(Actor, self).__init__()
 
         self.fc1 = nn.Linear(state_dim, 256)
@@ -26,49 +29,34 @@ class Actor(nn.Module):
 
         torch.nn.init.orthogonal_(self.fc1.weight.data, gain=math.sqrt(2.0))
         torch.nn.init.orthogonal_(self.fc2.weight.data, gain=math.sqrt(2.0))
-        torch.nn.init.orthogonal_(self.mu_head.weight.data, gain=math.sqrt(2.0))
-        torch.nn.init.orthogonal_(self.sigma_head.weight.data, gain=math.sqrt(2.0))
+        torch.nn.init.orthogonal_(self.mu_head.weight.data, gain=1e-2)
+        torch.nn.init.orthogonal_(self.sigma_head.weight.data, gain=1e-2)
 
-        self.max_action = max_action
+    def _get_outputs(self, state):
+        a = F.relu(self.fc1(state))
+        a = F.relu(self.fc2(a))
+        mu = self.mu_head(a)
+        mu = torch.clip(mu, MEAN_MIN, MEAN_MAX)
+        log_sigma = self.sigma_head(a)
+        log_sigma = torch.clip(log_sigma, LOG_STD_MIN, LOG_STD_MAX)
+        sigma = torch.exp(log_sigma)
+
+        a_distribution = TransformedDistribution(
+            Normal(mu, sigma), TanhTransform(cache_size=1)
+        )
+        a_tanh_mode = torch.tanh(mu)
+        return a_distribution, a_tanh_mode
 
     def forward(self, state):
-        a = F.relu(self.fc1(state))
-        a = F.relu(self.fc2(a))
-        mu = self.mu_head(a)
-        mu = torch.clip(mu, MEAN_MIN, MEAN_MAX)
-        log_sigma = self.sigma_head(a)
-        log_sigma = torch.clip(log_sigma, LOG_STD_MIN, LOG_STD_MAX)
-        sigma = torch.exp(log_sigma)
-
-        a_distribution = Normal(mu, sigma)
-        action = a_distribution.rsample()
-
-        logp_pi = a_distribution.log_prob(action).sum(axis=-1)
-        logp_pi -= (2 * (np.log(2) - action - F.softplus(-2 * action))).sum(axis=1)
-        logp_pi = torch.unsqueeze(logp_pi, dim=1)
-
-        action = self.max_action * torch.tanh(action)
-        mu = torch.tanh(mu) * self.max_action
-        return action, logp_pi, mu
+        a_dist, a_tanh_mode = self._get_outputs(state)
+        action = a_dist.rsample()
+        logp_pi = a_dist.log_prob(action).sum(axis=-1)
+        return action, logp_pi, a_tanh_mode
 
     def get_log_density(self, state, action):
-        a = F.relu(self.fc1(state))
-        a = F.relu(self.fc2(a))
-        mu = self.mu_head(a)
-        mu = torch.clip(mu, MEAN_MIN, MEAN_MAX)
-        log_sigma = self.sigma_head(a)
-        log_sigma = torch.clip(log_sigma, LOG_STD_MIN, LOG_STD_MAX)
-        sigma = torch.exp(log_sigma)
-        a_distribution = Normal(mu, sigma)
-
+        a_dist, _ = self._get_outputs(state)
         action_clip = torch.clip(action, -1. + EPS, 1. - EPS)
-        raw_action = torch.atanh(action_clip)
-
-        # logp_action = a_distribution.log_prob(raw_action).sum(axis=-1)
-        # logp_action -= (2 * (np.log(2) - raw_action - F.softplus(-2 * raw_action))).sum(axis=1)
-        # logp_action = torch.unsqueeze(logp_action, dim=1)
-        logp_action = a_distribution.log_prob(raw_action)
-        logp_action -= (2 * (np.log(2) - raw_action - F.softplus(-2 * raw_action)))
+        logp_action = a_dist.log_prob(action_clip)
         return logp_action
 
 
@@ -84,15 +72,16 @@ class Discriminator(nn.Module):
         torch.nn.init.orthogonal_(self.fc1_1.weight.data, gain=math.sqrt(2.0))
         torch.nn.init.orthogonal_(self.fc1_2.weight.data, gain=math.sqrt(2.0))
         torch.nn.init.orthogonal_(self.fc2.weight.data, gain=math.sqrt(2.0))
-        torch.nn.init.orthogonal_(self.fc3.weight.data, gain=math.sqrt(2.0))
+        torch.nn.init.orthogonal_(self.fc3.weight.data, gain=1e-2)
 
     def forward(self, state, action, log_pi):
         sa = torch.cat([state, action], 1)
         d1 = F.relu(self.fc1_1(sa))
         d2 = F.relu(self.fc1_2(log_pi))
         d = torch.cat([d1, d2], 1)
-        d = self.fc2(d)
-        d = self.fc3(d)
+        d = F.relu(self.fc2(d))
+        d = F.sigmoid(self.fc3(d))
+        d = torch.clip(d, 0.1, 0.9)
         return d
 
 
@@ -101,19 +90,19 @@ class DWBC(object):
             self,
             state_dim,
             action_dim,
-            max_action,
             alpha=2.5,
+            pu_learning=False,
             eta=0.5,
     ):
 
-        self.policy = Actor(state_dim, action_dim, max_action).to(device)
-        self.policy_optimizer = torch.optim.Adam(self.policy.parameters(), lr=3e-4)
+        self.policy = Actor(state_dim, action_dim).to(device)
+        self.policy_optimizer = torch.optim.Adam(self.policy.parameters(), lr=3e-4, weight_decay=0.001)
 
         self.discriminator = Discriminator(state_dim, action_dim).to(device)
         self.discriminator_optimizer = torch.optim.Adam(self.discriminator.parameters(), lr=3e-4)
 
-        self.max_action = max_action
         self.alpha = alpha
+        self.pu_learning = pu_learning
         self.eta = eta
 
         self.total_it = 0
@@ -136,9 +125,14 @@ class DWBC(object):
         d_e = self.discriminator(state_e, action_e, log_pi_e.detach())
         d_o = self.discriminator(state_o, action_o, log_pi_o.detach())
 
-        d_loss_e = -torch.log(d_e) + torch.log(1 - d_e)
-        d_loss_o = -torch.log(1 - d_o)
-        d_loss = self.eta * d_loss_e.mean() + d_loss_o.mean()
+        if self.pu_learning:
+            d_loss_e = -torch.log(d_e) + torch.log(1 - d_e)
+            d_loss_o = -torch.log(1 - d_o)
+            d_loss = self.eta * torch.mean(d_loss_e) + torch.mean(d_loss_o)
+        else:
+            d_loss_e = -torch.log(d_e)
+            d_loss_o = -torch.log(1 - d_o)
+            d_loss = torch.mean(d_loss_e) + torch.mean(d_loss_o)
 
         # Optimize the discriminator
         self.discriminator_optimizer.zero_grad()
@@ -146,17 +140,33 @@ class DWBC(object):
         self.discriminator_optimizer.step()
 
         # Compute policy loss
-        d_e_clip = torch.clip(d_e, 0.1, 0.9).detach()
-        d_o_clip = torch.clip(d_o, 0.1, 0.9).detach()
-        bc_loss = -log_pi_e.sum(1)
-        corr_loss_e = -log_pi_e.sum(1) * (self.eta / d_e_clip + self.eta / (1 - d_e_clip))
-        corr_loss_o = -log_pi_o.sum(1) * (1 / (1 - d_o_clip))
-        p_loss = self.alpha * bc_loss.mean() - corr_loss_e.mean() + corr_loss_o.mean()
+        d_e_clip = torch.squeeze(d_e).detach()
+        d_o_clip = torch.squeeze(d_o).detach()
+        d_o_clip[d_o_clip < 0.5] = 0.0
+
+        bc_loss = -torch.sum(log_pi_e, 1)
+        corr_loss_e = -torch.sum(log_pi_e, 1) * (self.eta / (d_e_clip * (1.0 - d_e_clip)) + 1.0)
+        corr_loss_o = -torch.sum(log_pi_o, 1) * (1.0 / (1.0 - d_o_clip) - 1.0)
+        p_loss = self.alpha * torch.mean(bc_loss) - torch.mean(corr_loss_e) + torch.mean(corr_loss_o)
 
         # Optimize the policy
         self.policy_optimizer.zero_grad()
         p_loss.backward()
         self.policy_optimizer.step()
+
+        # # wandb log
+        # w_e = self.eta / d_e_clip + self.eta / (1 - d_e_clip) + 1
+        # w_o = 1 / (1 - d_o_clip) - 1
+        # wandb.log({"d_loss": d_loss,
+        #            "p_loss": p_loss,
+        #            "max value of d_e": d_e_clip.max(),
+        #            "min value of d_e": d_e_clip.min(),
+        #            "max value of d_o": d_o_clip.max(),
+        #            "min value of d_o": d_o_clip.min(),
+        #            "max value of weight_e": w_e.max(),
+        #            "min value of weight_e": w_e.min(),
+        #            "max value of weight_o": w_o.max(),
+        #            "min value of weight_o": w_o.min()})
 
     def save(self, filename):
         torch.save(self.discriminator.state_dict(), filename + "_discriminator")
