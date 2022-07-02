@@ -154,20 +154,6 @@ class DWBC(object):
         p_loss.backward()
         self.policy_optimizer.step()
 
-        # # wandb log
-        # w_e = self.eta / d_e_clip + self.eta / (1 - d_e_clip) + 1
-        # w_o = 1 / (1 - d_o_clip) - 1
-        # wandb.log({"d_loss": d_loss,
-        #            "p_loss": p_loss,
-        #            "max value of d_e": d_e_clip.max(),
-        #            "min value of d_e": d_e_clip.min(),
-        #            "max value of d_o": d_o_clip.max(),
-        #            "min value of d_o": d_o_clip.min(),
-        #            "max value of weight_e": w_e.max(),
-        #            "min value of weight_e": w_e.min(),
-        #            "max value of weight_o": w_o.max(),
-        #            "min value of weight_o": w_o.min()})
-
     def save(self, filename):
         torch.save(self.discriminator.state_dict(), filename + "_discriminator")
         torch.save(self.discriminator_optimizer.state_dict(), filename + "_discriminator_optimizer")

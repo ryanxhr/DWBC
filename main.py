@@ -4,12 +4,11 @@ import gym
 import argparse
 import os
 import d4rl
-import wandb
 import time
 
 import utils
 import get_dataset
-from algos import DWBC, WBC, ORIL
+from algos import DWBC
 
 
 # Runs policy for X episodes and returns D4RL score
@@ -40,35 +39,28 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     # Experiment
     parser.add_argument("--algorithm", default="DWBC")  # Policy name
-    parser.add_argument('--env', default="ant-medium-replay-v2")  # environment name
-    parser.add_argument("--split_x", default=2, type=int)  # percentile X used to select the dataset
+    parser.add_argument('--env', default="hopper-expert-v2")  # environment name
+    parser.add_argument("--split_x", default=30, type=int)  # percentile X used to select the dataset
     parser.add_argument("--seed", default=0, type=int)  # Sets Gym, PyTorch and Numpy seeds
-    parser.add_argument("--eval_freq", default=5e3, type=int)  # How often (time steps) we evaluate
-    parser.add_argument("--max_timesteps", default=5e5, type=int)  # Max time steps to run environment
-    parser.add_argument("--save_model", action="store_true")  # Save model and optimizer parameters
-    parser.add_argument("--load_model", default="")  # Model load file name, "" doesn't load, "default" uses file_name
+    parser.add_argument("--eval_freq", default=1e3, type=int)  # How often (time steps) we evaluate
+    parser.add_argument("--max_timesteps", default=1e5, type=int)  # Max time steps to run environment
     # DWBC
     parser.add_argument("--batch_size", default=256, type=int)  # Batch size for both actor and critic
-    parser.add_argument("--alpha", default=20.0, type=float)
-    parser.add_argument("--pu_learning", default=False, type=bool)
+    parser.add_argument("--alpha", default=10.0, type=float)
+    parser.add_argument("--pu_learning", action='store_true')
     parser.add_argument("--eta", default=0.5, type=float)
-    parser.add_argument("--normalize", default=True, type=bool)
+    parser.add_argument("--no_normalize", action='store_true')
     args = parser.parse_args()
 
-    file_name = f"{args.algorithm}_{args.env}_{args.split_x}_{args.seed}_{args.pu_learning}_{args.eta}"
+    # checkpoint dir
+    dataset_name = f"./results/{args.env}_X-{args.split_x}"
+    algo_name = f"{args.algorithm}_alpha-{args.alpha}_pu-{args.pu_learning}_eta-{args.eta}"
+    os.makedirs(f"{dataset_name}/{algo_name}", exist_ok=True)
+    save_dir = f"{dataset_name}/{algo_name}/seed-{args.seed}.txt"
     print("---------------------------------------")
     print(f"Algorithm: {args.algorithm}, env: {args.env}, X: {args.split_x}, "
           f"Seed: {args.seed}, PU-learning: {args.pu_learning}, Eta: {args.eta}")
     print("---------------------------------------")
-
-    # wandb
-    # wandb.init(project="OffIL", entity="ryanxhr", name=file_name, config=args)
-
-    if not os.path.exists("./results"):
-        os.makedirs("./results")
-
-    if args.save_model and not os.path.exists("./models"):
-        os.makedirs("./models")
 
     env_e = gym.make(args.env)
     env_id = args.env.split('-')[0]
@@ -96,10 +88,6 @@ if __name__ == "__main__":
     elif args.algorithm == 'WBC':
         policy = WBC.WBC(state_dim, action_dim, args.alpha)
 
-    if args.load_model != "":
-        policy_file = file_name if args.load_model == "default" else args.load_model
-        policy.load(f"./models/{policy_file}")
-
     # Load dataset
     if "replay" in args.env:  # setting 1
         dataset_e_raw = env_e.get_dataset()
@@ -124,20 +112,22 @@ if __name__ == "__main__":
     replay_buffer_e.convert_D4RL(dataset_e)
     replay_buffer_o.convert_D4RL(dataset_o)
 
-    if args.normalize:
+    if args.no_normalize:
+        shift, scale = 0, 1
+    else:
         shift = np.mean(states_b, 0)
         scale = np.std(states_b, 0) + 1e-3
-    else:
-        shift, scale = 0, 1
     replay_buffer_e.normalize_states(mean=shift, std=scale)
     replay_buffer_o.normalize_states(mean=shift, std=scale)
 
-    evaluations = []
+    eval_log = open(save_dir, 'w')
+    # Start training
     for t in range(int(args.max_timesteps)):
         policy.train(replay_buffer_e, replay_buffer_o, args.batch_size)
         # Evaluate episode
         if (t + 1) % args.eval_freq == 0:
             print(f"Time steps: {t + 1}")
-            evaluations.append(eval_policy(policy, args.env, args.seed, shift, scale))
-            np.save(f"./results/{file_name}", evaluations)
-            if args.save_model: policy.save(f"./models/{file_name}")
+            average_returns = eval_policy(policy, args.env, args.seed, shift, scale)
+            eval_log.write(f'{t + 1}\t{average_returns}\n')
+            eval_log.flush()
+    eval_log.close()
