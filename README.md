@@ -7,7 +7,7 @@ Paper results were collected with [MuJoCo 1.50](http://www.mujoco.org/) (and [mu
 
 The paper results can be reproduced by running:
 ```
-./run_experiments.sh
+./run_dwbc.sh
 ```
 
 
