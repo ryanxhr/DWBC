@@ -70,9 +70,9 @@ def dataset_setting2(dataset1, dataset2, split_x, exp_num=10):
     return dataset_e, dataset_o
 
 
-def dataset_setting_relaxdice(dataset1, dataset2, num_e=1, num_o_e=10, num_o_o=1000):
+def dataset_setting_demodice(dataset1, dataset2, num_e=1, num_o_e=10, num_o_o=1000):
     """
-    Returns D_e and D_o of setting in relaxdice.
+    Returns D_e and D_o of setting in demodice.
     """
     dataset_o = dataset_T_trajs(dataset2, num_o_o)
     dataset_o['flag'] = np.zeros_like(dataset_o['terminals'])
