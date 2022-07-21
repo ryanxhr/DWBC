@@ -13,6 +13,9 @@ MEAN_MIN = -9.0
 MEAN_MAX = 9.0
 LOG_STD_MIN = -5
 LOG_STD_MAX = 2
+LOG_PI_NORM_MAX = 10
+LOG_PI_NORM_MIN = -20
+
 EPS = 1e-7
 
 
@@ -24,11 +27,6 @@ class Actor(nn.Module):
         self.fc2 = nn.Linear(256, 256)
         self.mu_head = nn.Linear(256, action_dim)
         self.sigma_head = nn.Linear(256, action_dim)
-
-        torch.nn.init.orthogonal_(self.fc1.weight.data, gain=math.sqrt(2.0))
-        torch.nn.init.orthogonal_(self.fc2.weight.data, gain=math.sqrt(2.0))
-        torch.nn.init.orthogonal_(self.mu_head.weight.data, gain=1e-2)
-        torch.nn.init.orthogonal_(self.sigma_head.weight.data, gain=1e-2)
 
     def _get_outputs(self, state):
         a = F.relu(self.fc1(state))
@@ -67,11 +65,6 @@ class Discriminator(nn.Module):
         self.fc2 = nn.Linear(256, 256)
         self.fc3 = nn.Linear(256, 1)
 
-        torch.nn.init.orthogonal_(self.fc1_1.weight.data, gain=math.sqrt(2.0))
-        torch.nn.init.orthogonal_(self.fc1_2.weight.data, gain=math.sqrt(2.0))
-        torch.nn.init.orthogonal_(self.fc2.weight.data, gain=math.sqrt(2.0))
-        torch.nn.init.orthogonal_(self.fc3.weight.data, gain=1e-2)
-
     def forward(self, state, action, log_pi):
         sa = torch.cat([state, action], 1)
         d1 = F.relu(self.fc1_1(sa))
@@ -88,20 +81,22 @@ class DWBC(object):
             self,
             state_dim,
             action_dim,
-            alpha=2.5,
-            pu_learning=False,
+            alpha=7.5,
+            no_pu=False,
             eta=0.5,
+            d_update_num=100,
     ):
 
         self.policy = Actor(state_dim, action_dim).to(device)
-        self.policy_optimizer = torch.optim.Adam(self.policy.parameters(), lr=3e-4, weight_decay=0.001)
+        self.policy_optimizer = torch.optim.Adam(self.policy.parameters(), lr=1e-4, weight_decay=0.005)
 
         self.discriminator = Discriminator(state_dim, action_dim).to(device)
-        self.discriminator_optimizer = torch.optim.Adam(self.discriminator.parameters(), lr=3e-4)
+        self.discriminator_optimizer = torch.optim.Adam(self.discriminator.parameters(), lr=1e-4)
 
         self.alpha = alpha
-        self.pu_learning = pu_learning
+        self.no_pu_learning = no_pu
         self.eta = eta
+        self.d_update_num = d_update_num
 
         self.total_it = 0
 
@@ -114,28 +109,33 @@ class DWBC(object):
         self.total_it += 1
 
         # Sample from D_e and D_o
-        state_e, action_e, _, _, _ = replay_buffer_e.sample(batch_size)
-        state_o, action_o, _, _, _ = replay_buffer_o.sample(batch_size)
+        state_e, action_e, _, _, _, flag_e = replay_buffer_e.sample(batch_size)
+        state_o, action_o, _, _, _, flag_o = replay_buffer_o.sample(batch_size)
         log_pi_e = self.policy.get_log_density(state_e, action_e)
         log_pi_o = self.policy.get_log_density(state_o, action_o)
 
         # Compute discriminator loss
-        d_e = self.discriminator(state_e, action_e, log_pi_e.detach())
-        d_o = self.discriminator(state_o, action_o, log_pi_o.detach())
+        log_pi_e_clip = torch.clip(log_pi_e, LOG_PI_NORM_MIN, LOG_PI_NORM_MAX)
+        log_pi_o_clip = torch.clip(log_pi_o, LOG_PI_NORM_MIN, LOG_PI_NORM_MAX)
+        log_pi_e_norm = (log_pi_e_clip - LOG_PI_NORM_MIN) / (LOG_PI_NORM_MAX - LOG_PI_NORM_MIN)
+        log_pi_o_norm = (log_pi_o_clip - LOG_PI_NORM_MIN) / (LOG_PI_NORM_MAX - LOG_PI_NORM_MIN)
+        d_e = self.discriminator(state_e, action_e, log_pi_e_norm.detach())
+        d_o = self.discriminator(state_o, action_o, log_pi_o_norm.detach())
 
-        if self.pu_learning:
-            d_loss_e = -torch.log(d_e) + torch.log(1 - d_e)
-            d_loss_o = -torch.log(1 - d_o)
-            d_loss = self.eta * torch.mean(d_loss_e) + torch.mean(d_loss_o)
-        else:
+        if self.no_pu_learning:
             d_loss_e = -torch.log(d_e)
             d_loss_o = -torch.log(1 - d_o)
-            d_loss = torch.mean(d_loss_e) + torch.mean(d_loss_o)
+            d_loss = torch.mean(d_loss_e + d_loss_o)
+        else:
+            d_loss_e = -torch.log(d_e)
+            d_loss_o = -torch.log(1 - d_o) / self.eta + torch.log(1 - d_e)
+            d_loss = torch.mean(d_loss_e + d_loss_o)
 
         # Optimize the discriminator
-        self.discriminator_optimizer.zero_grad()
-        d_loss.backward()
-        self.discriminator_optimizer.step()
+        if self.total_it % self.d_update_num == 0:
+            self.discriminator_optimizer.zero_grad()
+            d_loss.backward()
+            self.discriminator_optimizer.step()
 
         # Compute policy loss
         d_e_clip = torch.squeeze(d_e).detach()

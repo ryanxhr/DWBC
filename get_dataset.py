@@ -46,7 +46,45 @@ def qlearning_dataset(dataset, terminate_on_end=False):
     }
 
 
-def dataset_setting1(dataset, split_x, terminate_on_end=False):
+def dataset_setting1(dataset1, split_x):
+    """
+    Returns D_e and D_o of setting 1 in the paper.
+    """
+    dataset_e, dataset_o = dataset_split_replay(dataset1, split_x)
+    dataset_e['flag'] = np.ones_like(dataset_e['terminals'])
+    dataset_o['flag'] = np.zeros_like(dataset_o['terminals'])
+    return dataset_e, dataset_o
+
+
+def dataset_setting2(dataset1, dataset2, split_x, exp_num=10):
+    """
+    Returns D_e and D_o of setting 2 in the paper.
+    """
+    dataset_o = dataset_T_trajs(dataset2, 1000)
+    dataset_o['flag'] = np.zeros_like(dataset_o['terminals'])
+    dataset_e, dataset_o_extra = dataset_split_expert(dataset1, split_x, exp_num)
+    dataset_e['flag'] = np.ones_like(dataset_e['terminals'])
+    dataset_o_extra['flag'] = np.ones_like(dataset_o_extra['terminals'])
+    for key in dataset_o.keys():
+        dataset_o[key] = np.concatenate([dataset_o[key], dataset_o_extra[key]], 0)
+    return dataset_e, dataset_o
+
+
+def dataset_setting_relaxdice(dataset1, dataset2, num_e=1, num_o_e=10, num_o_o=1000):
+    """
+    Returns D_e and D_o of setting in relaxdice.
+    """
+    dataset_o = dataset_T_trajs(dataset2, num_o_o)
+    dataset_o['flag'] = np.zeros_like(dataset_o['terminals'])
+    dataset_e, dataset_o_extra = dataset_split_expert(dataset1, num_o_e, num_e+num_o_e)
+    dataset_e['flag'] = np.ones_like(dataset_e['terminals'])
+    dataset_o_extra['flag'] = np.ones_like(dataset_o_extra['terminals'])
+    for key in dataset_o.keys():
+        dataset_o[key] = np.concatenate([dataset_o[key], dataset_o_extra[key]], 0)
+    return dataset_e, dataset_o
+
+
+def dataset_split_replay(dataset, split_x, terminate_on_end=False):
     """
     Returns D_e and D_o of setting 1 in the paper.
     """
@@ -77,16 +115,17 @@ def dataset_setting1(dataset, split_x, terminate_on_end=False):
 
     # select top 20% return trajectories
     inds_all = np.argsort(return_traj)[::-1]
-    succ_num = int(len(inds_all) * 0.2)
+    succ_num = int(len(inds_all) * 0.05)
     inds_top20 = inds_all[:succ_num]
-    inds_e = inds_top20[::split_x]
+    inds_e = inds_top20[1::split_x]
+    # inds_e = inds_top20[:split_x]
     inds_e = list(inds_e)
     inds_all = list(inds_all)
     inds_o = set(inds_all) - set(inds_e)
     inds_o = list(inds_o)
 
-    print('# select {} trajs in mixed dataset as D_e'.format(len(inds_e)))
-    print('# select {} trajs in mixed dataset as D_o'.format(len(inds_o)))
+    print('# select {} trajs in mixed dataset as D_e, mean is {}'.format(len(inds_e), np.array(return_traj)[inds_e].mean()))
+    print('# select {} trajs in mixed dataset as D_o, mean is {}'.format(len(inds_o), np.array(return_traj)[inds_o].mean()))
 
     obs_traj_e = [obs_traj[i] for i in inds_e]
     next_obs_traj_e = [next_obs_traj[i] for i in inds_e]
@@ -122,17 +161,6 @@ def dataset_setting1(dataset, split_x, terminate_on_end=False):
     return dataset_e, dataset_o
 
 
-def dataset_setting2(dataset1, dataset2, split_x, exp_num=10):
-    """
-    Returns D_e and D_o of setting 2 in the paper.
-    """
-    dataset_o = dataset_T_trajs(dataset2, 1000)
-    dataset_e, dataset_o_extra = dataset_split_expert(dataset1, split_x, exp_num)
-    for key in dataset_o.keys():
-        dataset_o[key] = np.concatenate([dataset_o[key], dataset_o_extra[key]], 0)
-    return dataset_e, dataset_o
-
-
 def dataset_split_expert(dataset, split_x, exp_num, terminate_on_end=False):
     """
     Returns D_e and expert data in D_o of setting 2 in the paper.
@@ -165,7 +193,7 @@ def dataset_split_expert(dataset, split_x, exp_num, terminate_on_end=False):
     # select 10 trajectories
     inds_all = list(range(len(obs_traj)))
     inds_succ = inds_all[:exp_num]
-    inds_o = inds_succ[:split_x]
+    inds_o = inds_succ[-split_x:]
     inds_o = list(inds_o)
     inds_succ = list(inds_succ)
     inds_e = set(inds_succ) - set(inds_o)

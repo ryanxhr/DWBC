@@ -38,28 +38,28 @@ def eval_policy(policy, env_name, seed, mean, std, seed_offset=100, eval_episode
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     # Experiment
+    parser.add_argument("--root_dir", default="new_results")  # Policy name
     parser.add_argument("--algorithm", default="DWBC")  # Policy name
     parser.add_argument('--env', default="hopper-expert-v2")  # environment name
-    parser.add_argument("--split_x", default=30, type=int)  # percentile X used to select the dataset
+    parser.add_argument("--split_x", default=90, type=int)  # percentile X used to select the dataset
     parser.add_argument("--seed", default=0, type=int)  # Sets Gym, PyTorch and Numpy seeds
-    parser.add_argument("--eval_freq", default=1e3, type=int)  # How often (time steps) we evaluate
-    parser.add_argument("--max_timesteps", default=1e5, type=int)  # Max time steps to run environment
+    parser.add_argument("--eval_freq", default=5e3, type=int)  # How often (time steps) we evaluate
+    parser.add_argument("--max_timesteps", default=5e5, type=int)  # Max time steps to run environment
     # DWBC
     parser.add_argument("--batch_size", default=256, type=int)  # Batch size for both actor and critic
-    parser.add_argument("--alpha", default=10.0, type=float)
-    parser.add_argument("--pu_learning", action='store_true')
+    parser.add_argument("--alpha", default=7.5, type=float)
+    parser.add_argument("--no_pu", action='store_true')
     parser.add_argument("--eta", default=0.5, type=float)
     parser.add_argument("--no_normalize", action='store_true')
     args = parser.parse_args()
 
     # checkpoint dir
-    dataset_name = f"./results/{args.env}_X-{args.split_x}"
-    algo_name = f"{args.algorithm}_alpha-{args.alpha}_pu-{args.pu_learning}_eta-{args.eta}"
-    os.makedirs(f"{dataset_name}/{algo_name}", exist_ok=True)
-    save_dir = f"{dataset_name}/{algo_name}/seed-{args.seed}.txt"
+    dataset_name = f"{args.env}_X-{args.split_x}"
+    algo_name = f"{args.algorithm}_alpha-{args.alpha}_no_pu-{args.no_pu}_eta-{args.eta}"
+    os.makedirs(f"{args.root_dir}/{dataset_name}/{algo_name}", exist_ok=True)
+    save_dir = f"{args.root_dir}/{dataset_name}/{algo_name}/seed-{args.seed}.txt"
     print("---------------------------------------")
-    print(f"Algorithm: {args.algorithm}, env: {args.env}, X: {args.split_x}, "
-          f"Seed: {args.seed}, PU-learning: {args.pu_learning}, Eta: {args.eta}")
+    print(f"Dataset: {dataset_name}, Algorithm: {algo_name}, Seed: {args.seed}")
     print("---------------------------------------")
 
     env_e = gym.make(args.env)
@@ -84,9 +84,7 @@ if __name__ == "__main__":
 
     # Initialize policy
     if args.algorithm == 'DWBC':
-        policy = DWBC.DWBC(state_dim, action_dim, args.alpha, args.pu_learning, args.eta)
-    elif args.algorithm == 'WBC':
-        policy = WBC.WBC(state_dim, action_dim, args.alpha)
+        policy = DWBC.DWBC(state_dim, action_dim, args.alpha, args.no_pu, args.eta)
 
     # Load dataset
     if "replay" in args.env:  # setting 1
