@@ -10,6 +10,18 @@ The paper results can be reproduced by running:
 ./run_dwbc.sh
 ```
 
+You can also run DWBC on the setting used in [DemoDICE](https://openreview.net/forum?id=BrPdX1bDZkQ) and [SMODICE](https://arxiv.org/abs/2202.02433) by running `main_setting_demodice.py`:
+
+ ```
+python main_setting_demodice.py \
+    --algorithm="DWBC" \  
+    --env_e="hopper-expert-v2" \
+    --env_o="hopper-random-v2" \
+    --num_e=1 \  # expert trajectory num in D_e
+    --num_o_e=200 \  # expert trajectory num in D_o
+    --num_o_o=2000 \  # non-expert trajectory num in D_o
+```
+
 
 ### Bibtex
 ```
