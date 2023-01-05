@@ -46,19 +46,9 @@ def qlearning_dataset(dataset, terminate_on_end=False):
     }
 
 
-def dataset_setting1(dataset1, split_x):
+def dataset_setting1(dataset1, dataset2, split_x, exp_num=10):
     """
     Returns D_e and D_o of setting 1 in the paper.
-    """
-    dataset_e, dataset_o = dataset_split_replay(dataset1, split_x)
-    dataset_e['flag'] = np.ones_like(dataset_e['terminals'])
-    dataset_o['flag'] = np.zeros_like(dataset_o['terminals'])
-    return dataset_e, dataset_o
-
-
-def dataset_setting2(dataset1, dataset2, split_x, exp_num=10):
-    """
-    Returns D_e and D_o of setting 2 in the paper.
     """
     dataset_o = dataset_T_trajs(dataset2, 1000)
     dataset_o['flag'] = np.zeros_like(dataset_o['terminals'])
@@ -67,6 +57,16 @@ def dataset_setting2(dataset1, dataset2, split_x, exp_num=10):
     dataset_o_extra['flag'] = np.ones_like(dataset_o_extra['terminals'])
     for key in dataset_o.keys():
         dataset_o[key] = np.concatenate([dataset_o[key], dataset_o_extra[key]], 0)
+    return dataset_e, dataset_o
+
+
+def dataset_setting2(dataset1, split_x):
+    """
+    Returns D_e and D_o of setting 2 in the paper.
+    """
+    dataset_e, dataset_o = dataset_split_replay(dataset1, split_x)
+    dataset_e['flag'] = np.ones_like(dataset_e['terminals'])
+    dataset_o['flag'] = np.zeros_like(dataset_o['terminals'])
     return dataset_e, dataset_o
 
 
@@ -86,7 +86,7 @@ def dataset_setting_demodice(dataset1, dataset2, num_e=1, num_o_e=10, num_o_o=10
 
 def dataset_split_replay(dataset, split_x, terminate_on_end=False):
     """
-    Returns D_e and D_o of setting 1 in the paper.
+    Returns D_e and D_o from replay datasets.
     """
     N = dataset['rewards'].shape[0]
     return_traj = []
@@ -113,12 +113,12 @@ def dataset_split_replay(dataset, split_x, terminate_on_end=False):
             reward_traj.append([])
             done_traj.append([])
 
-    # select top 20% return trajectories
+    # select top 5% return trajectories
     inds_all = np.argsort(return_traj)[::-1]
     succ_num = int(len(inds_all) * 0.05)
-    inds_top20 = inds_all[:succ_num]
-    inds_e = inds_top20[1::split_x]
-    # inds_e = inds_top20[:split_x]
+    inds_top5 = inds_all[:succ_num]
+    inds_e = inds_top5[1::split_x]
+    # inds_e = inds_top5[:split_x]
     inds_e = list(inds_e)
     inds_all = list(inds_all)
     inds_o = set(inds_all) - set(inds_e)
@@ -163,7 +163,7 @@ def dataset_split_replay(dataset, split_x, terminate_on_end=False):
 
 def dataset_split_expert(dataset, split_x, exp_num, terminate_on_end=False):
     """
-    Returns D_e and expert data in D_o of setting 2 in the paper.
+    Returns D_e and expert data in D_o of setting 1 in the paper.
     """
     N = dataset['rewards'].shape[0]
     return_traj = []

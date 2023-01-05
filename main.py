@@ -87,16 +87,16 @@ if __name__ == "__main__":
         policy = DWBC.DWBC(state_dim, action_dim, args.alpha, args.no_pu, args.eta)
 
     # Load dataset
-    if "replay" in args.env:  # setting 1
+    if "replay" in args.env:  # setting 2
         dataset_e_raw = env_e.get_dataset()
         split_x = args.split_x
-        dataset_e, dataset_o = get_dataset.dataset_setting1(dataset_e_raw, split_x)
+        dataset_e, dataset_o = get_dataset.dataset_setting2(dataset_e_raw, split_x)
 
-    else:  # setting 2 or 3
+    else:  # setting 1 or 3
         dataset_e_raw = env_e.get_dataset()
         dataset_o_raw = env_o.get_dataset()
         split_x = int(exp_num * args.split_x / 100)
-        dataset_e, dataset_o = get_dataset.dataset_setting2(dataset_e_raw, dataset_o_raw, split_x, exp_num)
+        dataset_e, dataset_o = get_dataset.dataset_setting1(dataset_e_raw, dataset_o_raw, split_x, exp_num)
 
     states_e = dataset_e['observations']
     states_o = dataset_o['observations']
